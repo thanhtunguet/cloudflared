@@ -97,6 +97,7 @@ type EdgeAddr struct {
 // Does this matter? I don't know. It may someday. Let's use DoT so we don't need to worry about it.
 // See also: Go feature request for stdlib-supported DoH: https://github.com/golang/go/issues/27552
 var fallbackLookupSRV = lookupSRVWithDOT
+var fallbackLookupIP = lookupIPWithDOT
 
 var friendlyDNSErrorLines = []string{
 	`Please try the following things to diagnose this issue:`,
@@ -172,7 +173,11 @@ func lookupSRVWithDOT(srvService string, srvProto string, srvName string) (cname
 func resolveSRV(srv *net.SRV) ([]*EdgeAddr, error) {
 	ips, err := netLookupIP(srv.Target)
 	if err != nil {
-		return nil, errors.Wrapf(err, "Couldn't resolve SRV record %v", srv)
+		fallbackIPs, fallbackErr := fallbackLookupIP(srv.Target)
+		if fallbackErr != nil || len(fallbackIPs) == 0 {
+			return nil, errors.Wrapf(err, "Couldn't resolve SRV record %v", srv)
+		}
+		ips = fallbackIPs
 	}
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("SRV record %v had no IPs", srv)
@@ -190,6 +195,24 @@ func resolveSRV(srv *net.SRV) ([]*EdgeAddr, error) {
 		}
 	}
 	return addrs, nil
+}
+
+func lookupIPWithDOT(host string) ([]net.IP, error) {
+	r := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _ string, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			conn, err := dialer.DialContext(ctx, "tcp", dotServerAddr)
+			if err != nil {
+				return nil, err
+			}
+			tlsConfig := &tls.Config{ServerName: dotServerName}
+			return tls.Client(conn, tlsConfig), nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dotTimeout)
+	defer cancel()
+	return r.LookupIP(ctx, "ip", host)
 }
 
 // ResolveAddrs resolves TCP address given a list of addresses. Address can be a hostname, however, it will return at most one
