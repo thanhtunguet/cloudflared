@@ -2,6 +2,7 @@ package features
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -17,6 +18,10 @@ const (
 	featureSelectorHostname = "cfd-features.argotunnel.com"
 	lookupTimeout           = time.Second * 10
 	defaultLookupFreq       = time.Hour
+	publicResolverAddr1     = "1.1.1.1:53"
+	publicResolverAddr2     = "1.0.0.1:53"
+	publicDoTAddr           = "1.1.1.1:853"
+	publicDoTServerName     = "cloudflare-dns.com"
 )
 
 // If the TXT record adds other fields, the umarshal logic will ignore those keys
@@ -180,7 +185,27 @@ func (dr *dnsResolver) lookupRecord(ctx context.Context) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
 
-	records, err := dr.resolver.LookupTXT(ctx, featureSelectorHostname)
+	lookup := func(r *net.Resolver) ([]string, error) {
+		return r.LookupTXT(ctx, featureSelectorHostname)
+	}
+
+	records, err := lookup(dr.resolver)
+	if err == nil && len(records) > 0 {
+		return []byte(records[0]), nil
+	}
+
+	// Android can expose localhost DNS (e.g. ::1:53) that is not reachable by app sandboxes.
+	// Fall back to explicit public resolvers for feature lookup.
+	fallbackResolvers := []*net.Resolver{
+		newStaticResolver(publicResolverAddr1),
+		newStaticResolver(publicResolverAddr2),
+		newDoTResolver(publicDoTAddr, publicDoTServerName),
+	}
+	for _, r := range fallbackResolvers {
+		if recs, fallbackErr := lookup(r); fallbackErr == nil && len(recs) > 0 {
+			return []byte(recs[0]), nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +215,30 @@ func (dr *dnsResolver) lookupRecord(ctx context.Context) ([]byte, error) {
 	}
 
 	return []byte(records[0]), nil
+}
+
+func newStaticResolver(serverAddr string) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _ string, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", serverAddr)
+		},
+	}
+}
+
+func newDoTResolver(serverAddr, serverName string) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _ string, _ string) (net.Conn, error) {
+			var d net.Dialer
+			conn, err := d.DialContext(ctx, "tcp", serverAddr)
+			if err != nil {
+				return nil, err
+			}
+			return tls.Client(conn, &tls.Config{ServerName: serverName}), nil
+		},
+	}
 }
 
 func switchThreshold(accountTag string) uint32 {
