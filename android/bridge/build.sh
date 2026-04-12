@@ -50,23 +50,49 @@ find_ndk() {
         return 0
     fi
 
-    # Check common locations
+    # Check Android SDK locations
+    local sdk_paths=()
+    case "$(uname -s)" in
+        Darwin)
+            sdk_paths=(
+                "$HOME/Library/Android/sdk"
+                "/usr/local/share/android-sdk"
+            )
+            ;;
+        Linux)
+            sdk_paths=(
+                "$HOME/Android/Sdk"
+                "/opt/android-sdk"
+                "/usr/local/android-sdk"
+            )
+            ;;
+        *)
+            sdk_paths=("$HOME/Android/Sdk")
+            ;;
+    esac
+
+    for sdk_path in "${sdk_paths[@]}"; do
+        local ndk_dir="${sdk_path}/ndk"
+        if [[ -d "$ndk_dir" ]]; then
+            # Find the newest NDK version
+            local ndk_version
+            ndk_version=$(ls -1 "$ndk_dir" 2>/dev/null | sort -V | tail -n1 || true)
+            if [[ -n "$ndk_version" && -d "$ndk_dir/$ndk_version" ]]; then
+                echo "$ndk_dir/$ndk_version"
+                return 0
+            fi
+        fi
+    done
+
+    # Check standalone NDK installations
     local common_paths=(
-        "$HOME/Library/Android/sdk/ndk"
-        "$HOME/Android/Sdk/ndk"
         "/opt/android-ndk"
         "/usr/local/android-ndk"
     )
-
     for path in "${common_paths[@]}"; do
         if [[ -d "$path" ]]; then
-            # Find the newest NDK version
-            local ndk_version
-            ndk_version=$(ls -1 "$path" 2>/dev/null | sort -V | tail -n1 || true)
-            if [[ -n "$ndk_version" && -d "$path/$ndk_version" ]]; then
-                echo "$path/$ndk_version"
-                return 0
-            fi
+            echo "$path"
+            return 0
         fi
     done
 
@@ -76,17 +102,18 @@ find_ndk() {
 # Get toolchain path
 get_toolchain() {
     local ndk="$1"
-    local os
+    local host_tag
 
     case "$(uname -s)" in
         Darwin)
-            os="darwin"
+            # NDK only provides darwin-x86_64 host toolchains (universal binaries work on both Intel and Apple Silicon)
+            host_tag="darwin-x86_64"
             ;;
         Linux)
-            os="linux"
+            host_tag="linux-x86_64"
             ;;
         MINGW*|CYGWIN*|MSYS*)
-            os="windows"
+            host_tag="windows-x86_64"
             ;;
         *)
             log_error "Unsupported OS: $(uname -s)"
@@ -94,27 +121,11 @@ get_toolchain() {
             ;;
     esac
 
-    local arch
-    case "$(uname -m)" in
-        x86_64|amd64)
-            arch="x86_64"
-            ;;
-        arm64|aarch64)
-            arch="arm64"
-            ;;
-        *)
-            log_error "Unsupported architecture: $(uname -m)"
-            exit 1
-            ;;
-    esac
-
-    local host_tag="${os}-${arch}"
     local toolchain="${ndk}/toolchains/llvm/prebuilt/${host_tag}/bin"
 
     if [[ ! -d "$toolchain" ]]; then
-        # Try without arch suffix for older NDKs
-        host_tag="${os}-x86_64"
-        toolchain="${ndk}/toolchains/llvm/prebuilt/${host_tag}/bin"
+        log_error "Toolchain directory not found: $toolchain"
+        return 1
     fi
 
     echo "$toolchain"
@@ -124,33 +135,27 @@ get_toolchain() {
 build_arch() {
     local abi="$1"
     local goarch="$2"
-    local clang="$3"
+    local clang_base="$3"
 
-    log_info "Building for $abi ($goarch) with $clang..."
+    log_info "Building for $abi ($goarch)..."
 
     local out_dir="${BUILD_DIR}/${abi}"
     mkdir -p "$out_dir"
 
-    if [[ ! -x "$TOOLCHAIN/$clang" ]]; then
-        log_error "Compiler not found: $TOOLCHAIN/$clang"
+    # Clang binary name format: aarch64-linux-android21-clang (no dash before API level)
+    local cc="${TOOLCHAIN}/${clang_base}${api_level}-clang"
+
+    if [[ ! -x "$cc" ]]; then
+        log_error "Compiler not found: $cc"
         exit 1
     fi
-
-    # Determine API level based on ABI
-    local api_level="21"
-    if [[ "$abi" == "armeabi-v7a" ]]; then
-        api_level="21"
-    fi
-
-    # Extract base clang name and add API level
-    local cc="${clang}${api_level}"
 
     local output="${out_dir}/libcloudflared-bridge.so"
 
     CGO_ENABLED=1 \
     GOOS=android \
     GOARCH="$goarch" \
-    CC="${TOOLCHAIN}/${cc}" \
+    CC="$cc" \
     go build \
         -buildmode=c-shared \
         -ldflags="-s -w" \
@@ -165,8 +170,11 @@ build_arch() {
 main() {
     log_info "Starting Cloudflared Android Bridge build..."
 
+    # API level for Android
+    api_level="21"
+
     # Find NDK
-    NDK_HOME=$(find_ndk)
+    NDK_HOME=$(find_ndk) || true
     if [[ -z "$NDK_HOME" ]]; then
         log_error "Android NDK not found!"
         log_error "Please set ANDROID_NDK_HOME or install NDK at a standard location."
@@ -192,19 +200,19 @@ main() {
 
     case "$target_arch" in
         all|arm64-v8a)
-            build_arch "arm64-v8a" "arm64" "aarch64-linux-android-clang"
+            build_arch "arm64-v8a" "arm64" "aarch64-linux-android"
             ;;
     esac
 
     case "$target_arch" in
         all|armeabi-v7a)
-            build_arch "armeabi-v7a" "arm" "armv7a-linux-androideabi-clang"
+            build_arch "armeabi-v7a" "arm" "armv7a-linux-androideabi"
             ;;
     esac
 
     case "$target_arch" in
         all|x86_64)
-            build_arch "x86_64" "amd64" "x86_64-linux-android-clang"
+            build_arch "x86_64" "amd64" "x86_64-linux-android"
             ;;
     esac
 
@@ -222,7 +230,7 @@ main() {
     log_info "Output directory: $BUILD_DIR"
     echo ""
     log_info "Files generated:"
-    find "$BUILD_DIR" -type f -name "*.so" -o -name "*.h" | while read -r file; do
+    find "$BUILD_DIR" -type f \( -name "*.so" -o -name "*.h" \) | while read -r file; do
         echo "  - $file"
     done
 }

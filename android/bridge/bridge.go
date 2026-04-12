@@ -37,7 +37,7 @@
 // - nativeStartTunnel -> Java_com_example_app_CloudflaredBridge_nativeStartTunnel
 //
 // See the README.md for complete integration instructions.
-package bridge
+package main
 
 /*
 #include <stdlib.h>
@@ -52,11 +52,11 @@ typedef void (*log_callback_t)(int level, const char* msg);
 // Global log callback (set from Java/JNI)
 static log_callback_t g_log_callback = NULL;
 
-void set_log_callback(log_callback_t cb) {
+static void set_log_callback(log_callback_t cb) {
     g_log_callback = cb;
 }
 
-void forward_log(int level, const char* msg) {
+static void forward_log(int level, const char* msg) {
     if (g_log_callback != NULL) {
         g_log_callback(level, msg);
     } else {
@@ -408,7 +408,11 @@ func StopTunnel() {
 		cancel()
 	}
 	if done != nil {
-		<-done
+		select {
+		case <-done:
+		case <-time.After(25 * time.Second):
+			logger.Warn().Msg("StopTunnel: timeout waiting for tunnel goroutine; process exit will still tear down")
+		}
 	}
 }
 

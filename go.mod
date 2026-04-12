@@ -1,6 +1,6 @@
 module github.com/cloudflare/cloudflared
 
-go 1.26
+go 1.24
 
 require (
 	github.com/coreos/go-oidc/v3 v3.17.0
