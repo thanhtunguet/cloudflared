@@ -15,19 +15,19 @@
 //  3. In your Android Kotlin/Java code, load the library and call the native methods:
 //
 //     object CloudflaredBridge {
-//         init {
-//             System.loadLibrary("cloudflared-bridge")
-//         }
+//     init {
+//     System.loadLibrary("cloudflared-bridge")
+//     }
 //
-//         @JvmStatic private external fun nativeStartTunnel(token: String, proxyPort: Int): String
-//         @JvmStatic private external fun nativeStopTunnel()
-//         @JvmStatic private external fun nativeIsTunnelRunning(): Int
-//         @JvmStatic private external fun nativeGetLastError(): String
-//         @JvmStatic private external fun nativeSetLogCallback(callback: LogCallback?)
+//     @JvmStatic private external fun nativeStartTunnel(token: String, proxyPort: Int): String
+//     @JvmStatic private external fun nativeStopTunnel()
+//     @JvmStatic private external fun nativeIsTunnelRunning(): Int
+//     @JvmStatic private external fun nativeGetLastError(): String
+//     @JvmStatic private external fun nativeSetLogCallback(callback: LogCallback?)
 //
-//         interface LogCallback {
-//             fun onLog(level: Int, message: String)
-//         }
+//     interface LogCallback {
+//     fun onLog(level: Int, message: String)
+//     }
 //     }
 //
 // The bridge exposes functions that map to the JNI naming convention:
@@ -106,6 +106,7 @@ var (
 	tunnelCancel    context.CancelFunc
 	tunnelDone      chan struct{}
 	tunnelRunning   bool
+	tunnelConnected bool
 	tunnelLastError string
 	logger          zerolog.Logger
 )
@@ -221,19 +222,29 @@ func buildEdgeTLSConfigs() (map[connection.Protocol]*tls.Config, error) {
 
 //export StartTunnel
 func StartTunnel(token *C.char, proxyPort C.int) *C.char {
+	return StartTunnelWithProtocol(token, proxyPort, nil)
+}
+
+//export StartTunnelWithProtocol
+func StartTunnelWithProtocol(token *C.char, proxyPort C.int, protocol *C.char) *C.char {
 	tokenStr := C.GoString(token)
 	if tokenStr == "" {
 		return C.CString("token is required")
 	}
 
-	err := startTunnelInternal(tokenStr, int(proxyPort))
+	protocolStr := connection.AutoSelectFlag
+	if protocol != nil {
+		protocolStr = C.GoString(protocol)
+	}
+
+	err := startTunnelInternal(tokenStr, int(proxyPort), protocolStr)
 	if err != nil {
 		return C.CString(err.Error())
 	}
 	return C.CString("")
 }
 
-func startTunnelInternal(tokenStr string, proxyPort int) error {
+func startTunnelInternal(tokenStr string, proxyPort int, protocol string) error {
 	tunnelMu.Lock()
 	defer tunnelMu.Unlock()
 
@@ -277,7 +288,7 @@ func startTunnelInternal(tokenStr string, proxyPort int) error {
 
 	// Protocol selector
 	protocolSelector, err := connection.NewProtocolSelector(
-		connection.AutoSelectFlag,
+		protocol,
 		namedTunnel.Credentials.AccountTag,
 		true,
 		false,
@@ -372,6 +383,7 @@ func startTunnelInternal(tokenStr string, proxyPort int) error {
 	tunnelCancel = cancel
 	tunnelDone = done
 	tunnelRunning = true
+	tunnelConnected = false
 	tunnelLastError = ""
 
 	go func() {
@@ -382,7 +394,9 @@ func startTunnelInternal(tokenStr string, proxyPort int) error {
 			}
 			tunnelMu.Lock()
 			tunnelRunning = false
+			tunnelConnected = false
 			tunnelCancel = nil
+			tunnelDone = nil
 			tunnelMu.Unlock()
 			close(done)
 		}()
@@ -426,6 +440,16 @@ func IsTunnelRunning() C.int {
 	return 0
 }
 
+//export IsTunnelConnected
+func IsTunnelConnected() C.int {
+	tunnelMu.Lock()
+	defer tunnelMu.Unlock()
+	if tunnelConnected {
+		return 1
+	}
+	return 0
+}
+
 //export GetLastError
 func GetLastError() *C.char {
 	tunnelMu.Lock()
@@ -446,16 +470,25 @@ func setTunnelError(err string) {
 	tunnelLastError = err
 }
 
+func setTunnelConnected(connected bool) {
+	tunnelMu.Lock()
+	defer tunnelMu.Unlock()
+	tunnelConnected = connected
+}
+
 // tunnelEventSink implements connection.EventSink.
 type tunnelEventSink struct{}
 
 func (s *tunnelEventSink) OnTunnelEvent(e connection.Event) {
 	switch e.EventType {
 	case connection.Connected:
+		setTunnelConnected(true)
 		setTunnelError("")
 	case connection.Disconnected:
+		setTunnelConnected(false)
 		setTunnelError(fmt.Sprintf("disconnected (conn %d, location %s)", e.Index, e.Location))
 	case connection.Reconnecting:
+		setTunnelConnected(false)
 		setTunnelError(fmt.Sprintf("reconnecting (conn %d)", e.Index))
 	}
 }

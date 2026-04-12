@@ -118,8 +118,10 @@ extern "C" {
 
 extern void SetLogCallback(void* cb);
 extern char* StartTunnel(char* token, int proxyPort);
+extern char* StartTunnelWithProtocol(char* token, int proxyPort, char* protocol);
 extern void StopTunnel(void);
 extern int IsTunnelRunning(void);
+extern int IsTunnelConnected(void);
 extern char* GetLastError(void);
 extern void FreeString(char* s);
 

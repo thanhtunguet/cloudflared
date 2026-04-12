@@ -16,8 +16,10 @@
 
 // Go exported functions (from bridge.go, compiled into the shared library)
 extern char* StartTunnel(char* token, int proxyPort);
+extern char* StartTunnelWithProtocol(char* token, int proxyPort, char* protocol);
 extern void StopTunnel(void);
 extern int IsTunnelRunning(void);
+extern int IsTunnelConnected(void);
 extern char* GetLastError(void);
 extern void FreeString(char* s);
 
@@ -39,6 +41,43 @@ Java_info_thanhtunguet_myhome_CloudflareTunnelBridge_nativeStartTunnel(
     }
 
     char* result = StartTunnel((char*)tokenChars, (int)proxyPort);
+    (*env)->ReleaseStringUTFChars(env, token, tokenChars);
+
+    jstring jResult = (*env)->NewStringUTF(env, result ? result : "");
+    if (result != NULL) {
+        FreeString(result);
+    }
+    return jResult;
+}
+
+// Java_info_thanhtunguet_myhome_CloudflareTunnelBridge_nativeStartTunnelWithProtocol
+// Starts the tunnel with the given token, proxy port and protocol override.
+// Protocol: "auto" (default), "quic", or "http2".
+JNIEXPORT jstring JNICALL
+Java_info_thanhtunguet_myhome_CloudflareTunnelBridge_nativeStartTunnelWithProtocol(
+    JNIEnv* env,
+    jclass clazz,
+    jstring token,
+    jint proxyPort,
+    jstring protocol) {
+
+    (void)clazz;
+
+    const char* tokenChars = (*env)->GetStringUTFChars(env, token, NULL);
+    if (tokenChars == NULL) {
+        return (*env)->NewStringUTF(env, "failed to get token string");
+    }
+
+    const char* protocolChars = NULL;
+    if (protocol != NULL) {
+        protocolChars = (*env)->GetStringUTFChars(env, protocol, NULL);
+    }
+
+    char* result = StartTunnelWithProtocol((char*)tokenChars, (int)proxyPort, (char*)protocolChars);
+
+    if (protocol != NULL && protocolChars != NULL) {
+        (*env)->ReleaseStringUTFChars(env, protocol, protocolChars);
+    }
     (*env)->ReleaseStringUTFChars(env, token, tokenChars);
 
     jstring jResult = (*env)->NewStringUTF(env, result ? result : "");
@@ -70,6 +109,18 @@ Java_info_thanhtunguet_myhome_CloudflareTunnelBridge_nativeIsTunnelRunning(
     (void)env;
     (void)clazz;
     return (jint)IsTunnelRunning();
+}
+
+// Java_info_thanhtunguet_myhome_CloudflareTunnelBridge_nativeIsTunnelConnected
+// Returns 1 if tunnel has an active connected edge session, 0 otherwise.
+JNIEXPORT jint JNICALL
+Java_info_thanhtunguet_myhome_CloudflareTunnelBridge_nativeIsTunnelConnected(
+    JNIEnv* env,
+    jclass clazz) {
+
+    (void)env;
+    (void)clazz;
+    return (jint)IsTunnelConnected();
 }
 
 // Java_info_thanhtunguet_myhome_CloudflareTunnelBridge_nativeGetLastError
