@@ -152,13 +152,16 @@ build_arch() {
 
     local output="${out_dir}/libcloudflared-bridge.so"
 
+    # 16KB page size support (required by Google Play for apps targeting Android 15+).
+    # Sets ELF LOAD segment alignment to 16KB so 64-bit devices with 16KB pages can mmap the .so.
+    # Harmless on 32-bit ABIs, which don't run in 16KB mode.
     CGO_ENABLED=1 \
     GOOS=android \
     GOARCH="$goarch" \
     CC="$cc" \
     go build \
         -buildmode=c-shared \
-        -ldflags="-s -w" \
+        -ldflags="-s -w -extldflags '-Wl,-z,max-page-size=16384'" \
         -trimpath \
         -o "$output" \
         "${SCRIPT_DIR}"
