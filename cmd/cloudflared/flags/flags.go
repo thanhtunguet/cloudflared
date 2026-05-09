@@ -81,6 +81,9 @@ const (
 	// EdgeBindAddress is the command line flag to bind to IP address for outgoing connections to Cloudflare Edge
 	EdgeBindAddress = "edge-bind-address"
 
+	// CACert Certificate Authority authenticating connections with Cloudflare's edge network.
+	CACert = "cacert"
+
 	// Force is the command line flag to specify if you wish to force an action
 	Force = "force"
 
@@ -122,6 +125,9 @@ const (
 
 	// NoPrechecks is the command line flag to skip connectivity pre-checks at startup.
 	NoPrechecks = "no-prechecks"
+
+	// Prechecks is the command line flag to run connectivity pre-checks at startup.
+	Prechecks = "prechecks"
 
 	// LogLevel is the command line flag for the cloudflared logging level
 	LogLevel = "loglevel"
