@@ -29,6 +29,7 @@ const (
 
 type featuresRecord struct {
 	DatagramV3Percentage uint32 `json:"dv3_2"`
+	SkipPrechecks        bool   `json:"skip_prechecks"`
 
 	// DatagramV3Percentage int32 `json:"dv3"` // Removed in TUN-9291
 	// DatagramV3Percentage uint32 `json:"dv3_1"` // Removed in TUN-9883
@@ -94,6 +95,7 @@ func (fs *featureSelector) Snapshot() FeatureSnapshot {
 		PostQuantum:     fs.postQuantumMode(),
 		DatagramVersion: fs.datagramVersion(),
 		FeaturesList:    fs.clientFeatures(),
+		SkipPrechecks:   fs.prechecksSkip(),
 	}
 }
 
@@ -124,6 +126,12 @@ func (fs *featureSelector) datagramVersion() DatagramVersion {
 	}
 
 	return DatagramV2
+}
+
+// prechecksSkip returns whether prechecks are enabled via DNS flag.
+// Defaults to false if not set in the DNS TXT record.
+func (fs *featureSelector) prechecksSkip() bool {
+	return fs.remoteFeatures.SkipPrechecks
 }
 
 // clientFeatures will return the list of currently available features that cloudflared should provide to the edge.
@@ -211,7 +219,7 @@ func (dr *dnsResolver) lookupRecord(ctx context.Context) ([]byte, error) {
 	}
 
 	if len(records) == 0 {
-		return nil, fmt.Errorf("No TXT record found for %s to determine which features to opt-in", featureSelectorHostname)
+		return nil, fmt.Errorf("no TXT record found for %s to determine which features to opt-in", featureSelectorHostname)
 	}
 
 	return []byte(records[0]), nil
