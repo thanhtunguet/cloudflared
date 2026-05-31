@@ -291,7 +291,6 @@ func startTunnelInternal(tokenStr string, proxyPort int, protocol string) error 
 		protocol,
 		namedTunnel.Credentials.AccountTag,
 		true,
-		false,
 		edgediscovery.ProtocolPercentage,
 		connection.ResolveTTL,
 		&logger,
