@@ -75,7 +75,6 @@ import "C"
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -88,7 +87,6 @@ import (
 	"github.com/cloudflare/cloudflared/client"
 	cfconfig "github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
-	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/features"
 	"github.com/cloudflare/cloudflared/ingress"
 	"github.com/cloudflare/cloudflared/ingress/origins"
@@ -188,26 +186,9 @@ func buildEdgeTLSConfigs() (map[connection.Protocol]*tls.Config, error) {
 			return nil, fmt.Errorf("%s has unknown TLS settings", p)
 		}
 
-		cfg, err := tlsconfig.GetConfig(&tlsconfig.TLSParameters{
-			ServerName: tlsSettings.ServerName,
-		})
+		cfg, err := tlsconfig.CreateTunnelConfig("", tlsSettings.ServerName)
 		if err != nil {
 			return nil, fmt.Errorf("TLS config for %s: %w", p, err)
-		}
-
-		if cfg.RootCAs == nil {
-			rootCAs, err := x509.SystemCertPool()
-			if err != nil {
-				rootCAs = x509.NewCertPool()
-			}
-			cfRootCAs, err := tlsconfig.GetCloudflareRootCA()
-			if err != nil {
-				return nil, fmt.Errorf("cloudflare root CA: %w", err)
-			}
-			for _, cert := range cfRootCAs {
-				rootCAs.AddCert(cert)
-			}
-			cfg.RootCAs = rootCAs
 		}
 
 		if len(tlsSettings.NextProtos) > 0 {
@@ -287,14 +268,7 @@ func startTunnelInternal(tokenStr string, proxyPort int, protocol string) error 
 	}
 
 	// Protocol selector
-	protocolSelector, err := connection.NewProtocolSelector(
-		protocol,
-		namedTunnel.Credentials.AccountTag,
-		true,
-		edgediscovery.ProtocolPercentage,
-		connection.ResolveTTL,
-		&logger,
-	)
+	protocolSelector, err := connection.NewProtocolSelector(protocol, &logger)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("protocol selector: %w", err)
@@ -375,7 +349,6 @@ func startTunnelInternal(tokenStr string, proxyPort int, protocol string) error 
 	}
 
 	connectedSignal := signal.New(make(chan struct{}))
-	reconnectCh := make(chan supervisor.ReconnectSignal, 1)
 	graceShutdownC := make(chan struct{})
 
 	done := make(chan struct{})
@@ -400,7 +373,7 @@ func startTunnelInternal(tokenStr string, proxyPort int, protocol string) error 
 			close(done)
 		}()
 
-		err := supervisor.StartTunnelDaemon(ctx, tunnelConfig, orchestrator, connectedSignal, reconnectCh, graceShutdownC)
+		err := supervisor.StartTunnelDaemon(ctx, tunnelConfig, orchestrator, connectedSignal, graceShutdownC)
 		if err != nil && ctx.Err() == nil {
 			logger.Error().Err(err).Msg("tunnel daemon exited with error")
 			setTunnelError(err.Error())
