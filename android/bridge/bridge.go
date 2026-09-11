@@ -238,12 +238,10 @@ func startTunnelInternal(tokenStr string, proxyPort int, protocol string) error 
 		return fmt.Errorf("parse token: %w", err)
 	}
 
-	logTransport := logger.With().Str("transport", "edge").Logger()
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Observer
-	observer := connection.NewObserver(&logger, &logTransport)
+	observer := connection.NewObserver(&logger)
 	observer.RegisterSink(&tunnelEventSink{})
 
 	// Feature selector
@@ -320,7 +318,6 @@ func startTunnelInternal(tokenStr string, proxyPort int, protocol string) error 
 		HAConnections:       1,
 		Tags:                tags,
 		Log:                 &logger,
-		LogTransport:        &logTransport,
 		Observer:            observer,
 		ReportedVersion:     "android-embedded",
 		Retries:             5,
