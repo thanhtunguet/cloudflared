@@ -134,15 +134,12 @@ func buildEdgeTLSConfigs() (map[connection.Protocol]*tls.Config, error) {
 	return configs, nil
 }
 
-// Start launches the tunnel daemon with the provided token, origin port, and edge protocol.
+// Start reserves the tunnel lifecycle and launches its initialization asynchronously.
+//
+// Feature discovery can perform DNS requests, which are particularly slow or unavailable
+// on Android TV networks. JNI must return promptly so that a Stop request can cancel that
+// initialization instead of blocking the app in a perpetual "Starting" state.
 func (m *Manager) Start(ctx context.Context, tokenStr string, proxyPort int, protocol string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.running {
-		return fmt.Errorf("tunnel already running")
-	}
-
 	namedTunnel, err := ParseToken(tokenStr)
 	if err != nil {
 		return fmt.Errorf("parse token: %w", err)
@@ -153,23 +150,68 @@ func (m *Manager) Start(ctx context.Context, tokenStr string, proxyPort int, pro
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		cancel()
+		return fmt.Errorf("tunnel already running")
+	}
+	m.cancel = cancel
+	m.done = done
+	m.running = true
+	m.connected = false
+	m.lastError = ""
+	m.mu.Unlock()
+
+	go m.run(runCtx, done, namedTunnel, proxyPort, protocol)
+	return nil
+}
+
+func (m *Manager) run(
+	runCtx context.Context,
+	done chan struct{},
+	namedTunnel *connection.TunnelProperties,
+	proxyPort int,
+	protocol string,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error().Msgf("tunnel panic: %v", r)
+			m.setError(fmt.Sprintf("panic: %v", r))
+		}
+		m.mu.Lock()
+		if m.done == done {
+			m.running = false
+			m.connected = false
+			m.cancel = nil
+			m.done = nil
+		}
+		m.mu.Unlock()
+		close(done)
+	}()
 
 	// Observer
 	observer := connection.NewObserver(&m.logger)
 	observer.RegisterSink(&tunnelEventSink{m: m})
 
-	// Feature selector
-	featureSelector, err := features.NewFeatureSelector(runCtx, namedTunnel.Credentials.AccountTag, nil, false, &m.logger)
+	// Feature discovery is optional. Android TV boxes commonly have a captive or
+	// unreachable DNS resolver; never let that auxiliary lookup delay the tunnel
+	// connection indefinitely. The selector safely falls back to default features.
+	featureCtx, cancelFeatureLookup := context.WithTimeout(runCtx, 3*time.Second)
+	featureSelector, err := features.NewFeatureSelector(featureCtx, namedTunnel.Credentials.AccountTag, nil, false, &m.logger)
+	cancelFeatureLookup()
 	if err != nil {
-		cancel()
-		return fmt.Errorf("feature selector: %w", err)
+		m.recordStartupError(runCtx, fmt.Errorf("feature selector: %w", err))
+		return
 	}
 
 	// Client config
 	clientConfig, err := client.NewConfig("android-embedded", runtime.GOARCH, featureSelector)
 	if err != nil {
-		cancel()
-		return fmt.Errorf("client config: %w", err)
+		m.recordStartupError(runCtx, fmt.Errorf("client config: %w", err))
+		return
 	}
 
 	m.logger.Info().Msgf("Connector ID: %s", clientConfig.ConnectorID)
@@ -180,14 +222,14 @@ func (m *Manager) Start(ctx context.Context, tokenStr string, proxyPort int, pro
 
 	protocolSelector, err := connection.NewProtocolSelector(protocol, &m.logger)
 	if err != nil {
-		cancel()
-		return fmt.Errorf("protocol selector: %w", err)
+		m.recordStartupError(runCtx, fmt.Errorf("protocol selector: %w", err))
+		return
 	}
 
 	edgeTLSConfigs, err := buildEdgeTLSConfigs()
 	if err != nil {
-		cancel()
-		return fmt.Errorf("edge TLS: %w", err)
+		m.recordStartupError(runCtx, fmt.Errorf("edge TLS: %w", err))
+		return
 	}
 
 	ingressRules, err := ingress.ParseIngress(&cfconfig.Configuration{
@@ -196,8 +238,8 @@ func (m *Manager) Start(ctx context.Context, tokenStr string, proxyPort int, pro
 		},
 	})
 	if err != nil {
-		cancel()
-		return fmt.Errorf("parse ingress: %w", err)
+		m.recordStartupError(runCtx, fmt.Errorf("parse ingress: %w", err))
+		return
 	}
 
 	warpConfig := ingress.NewWarpRoutingConfig(&cfconfig.WarpRoutingConfig{})
@@ -245,61 +287,39 @@ func (m *Manager) Start(ctx context.Context, tokenStr string, proxyPort int, pro
 
 	orchestrator, err := orchestration.NewOrchestrator(runCtx, orchConfig, tags, nil, &m.logger)
 	if err != nil {
-		cancel()
-		return fmt.Errorf("orchestrator: %w", err)
+		m.recordStartupError(runCtx, fmt.Errorf("orchestrator: %w", err))
+		return
 	}
 
 	connectedSignal := signal.New(make(chan struct{}))
 	graceShutdownC := make(chan struct{})
 
-	done := make(chan struct{})
-	m.cancel = cancel
-	m.done = done
-	m.running = true
-	m.connected = false
-	m.lastError = ""
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				m.logger.Error().Msgf("tunnel panic: %v", r)
-				m.setError(fmt.Sprintf("panic: %v", r))
-			}
-			m.mu.Lock()
-			m.running = false
-			m.connected = false
-			m.cancel = nil
-			m.done = nil
-			m.mu.Unlock()
-			close(done)
-		}()
-
-		err := supervisor.StartTunnelDaemon(runCtx, tunnelConfig, orchestrator, connectedSignal, graceShutdownC)
-		if err != nil && runCtx.Err() == nil {
-			m.logger.Error().Err(err).Msg("tunnel daemon exited with error")
-			m.setError(err.Error())
-		}
-	}()
-
-	return nil
+	err = supervisor.StartTunnelDaemon(runCtx, tunnelConfig, orchestrator, connectedSignal, graceShutdownC)
+	if err != nil && runCtx.Err() == nil {
+		m.logger.Error().Err(err).Msg("tunnel daemon exited with error")
+		m.setError(err.Error())
+	}
 }
 
-// Stop terminates the running tunnel daemon gracefully.
+func (m *Manager) recordStartupError(ctx context.Context, err error) {
+	if ctx.Err() == nil {
+		m.logger.Error().Err(err).Msg("tunnel startup failed")
+		m.setError(err.Error())
+	}
+}
+
+// Stop requests that the running tunnel daemon terminate gracefully.
+//
+// StartTunnelDaemon may need time to unwind an in-flight network operation. JNI callers
+// must never block their service lifecycle on that cleanup: they observe IsRunning and
+// start a replacement only after the daemon goroutine has returned.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	cancel := m.cancel
-	done := m.done
 	m.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
-	}
-	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(25 * time.Second):
-			m.logger.Warn().Msg("Stop: timeout waiting for tunnel goroutine; process exit will still tear down")
-		}
 	}
 }
 

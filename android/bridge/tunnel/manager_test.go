@@ -1,9 +1,11 @@
 package tunnel
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -65,4 +67,54 @@ func TestManagerInitialState(t *testing.T) {
 	if mgr.GetLastError() != "" {
 		t.Errorf("expected empty error, got %s", mgr.GetLastError())
 	}
+}
+
+func TestStopDoesNotWaitForDaemonShutdown(t *testing.T) {
+	mgr := NewManager()
+	ctx, cancel := context.WithCancel(context.Background())
+	mgr.cancel = cancel
+	mgr.done = make(chan struct{}) // Simulate a daemon that has not unwound yet.
+
+	returned := make(chan struct{})
+	go func() {
+		mgr.Stop()
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Stop blocked while waiting for daemon shutdown")
+	}
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("Stop did not cancel the daemon context")
+	}
+}
+
+func TestStartReturnsBeforeFeatureDiscoveryCompletes(t *testing.T) {
+	tid := uuid.New()
+	token, err := json.Marshal(tokenPayload{
+		AccountTag:   "test-account-tag",
+		TunnelSecret: []byte("secret-key-bytes-12345678"),
+		TunnelID:     tid,
+	})
+	if err != nil {
+		t.Fatalf("marshal token: %v", err)
+	}
+
+	mgr := NewManager()
+	startedAt := time.Now()
+	if err := mgr.Start(context.Background(), base64.StdEncoding.EncodeToString(token), 8080, "auto"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("Start blocked for %s while initializing", elapsed)
+	}
+	if !mgr.IsRunning() {
+		t.Fatal("expected manager to reserve the running state immediately")
+	}
+	mgr.Stop()
 }
