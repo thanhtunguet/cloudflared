@@ -23,8 +23,9 @@ const httpTimeout = 15 * time.Second
 const disclaimer = "Thank you for trying Cloudflare Tunnel. Doing so, without a Cloudflare account, is a quick way to experiment and try it out. However, be aware that these account-less Tunnels have no uptime guarantee, are subject to the Cloudflare Online Services Terms of Use (https://www.cloudflare.com/website-terms/), and Cloudflare reserves the right to investigate your use of Tunnels for violations of such terms. If you intend to use Tunnels in production you should use a pre-created named tunnel by following: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps"
 
 const (
-	quickTunnelAuthModeField = "auth_mode"
-	quickTunnelAuthModeOTP   = "otp"
+	quickTunnelAuthModeField           = "auth_mode"
+	quickTunnelAuthModeOTP             = "otp"
+	quickTunnelMaxProvisioningResponse = 1 << 20 // 1 MiB
 )
 
 // buildQuickTunnelRequestBody returns the provisioning request body.
@@ -82,26 +83,14 @@ func RunQuickTunnel(sc *subcommandContext) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// This will read the entire response into memory so we can print it in case of error
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readQuickTunnelProvisioningResponse(resp.Body)
 	if err != nil {
-		return errors.Wrap(err, "failed to read quick-tunnel response")
+		return err
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var data QuickTunnelResponse
-		if err := json.Unmarshal(respBody, &data); err == nil && len(data.Errors) > 0 {
-			return fmt.Errorf("quick tunnel provisioning failed with status %d: %s", resp.StatusCode, formatQuickTunnelErrors(data.Errors))
-		}
-		return fmt.Errorf("quick tunnel provisioning failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var data QuickTunnelResponse
-	if err := json.Unmarshal(respBody, &data); err != nil {
-		respString := string(respBody)
-		fields := map[string]interface{}{"status_code": resp.Status}
-		sc.log.Err(err).Fields(fields).Msgf("Error unmarshaling QuickTunnel response: %s", respString)
-		return errors.Wrap(err, "failed to unmarshal quick Tunnel")
+	data, err := decodeQuickTunnelProvisioningResponse(resp.StatusCode, respBody)
+	if err != nil {
+		return err
 	}
 
 	// TODO(TUN-10791): Add CLI-level coverage that provisioning errors are logged to users.
@@ -124,7 +113,7 @@ func RunQuickTunnel(sc *subcommandContext) error {
 		TunnelID:     tunnelID,
 	}
 
-	var quickTunnelAuth connection.HTTPRequestInterceptor
+	var quickTunnelAuthorizer connection.HTTPRequestAuthorizer
 	if recipientPolicy != nil {
 		stateManager, err := quicktunnelauth.NewQuickTunnelAuthStateManager(data.Result.Hostname)
 		if err != nil {
@@ -139,7 +128,7 @@ func RunQuickTunnel(sc *subcommandContext) error {
 		if err != nil {
 			return fmt.Errorf("initialize Quick Tunnel session manager: %w", err)
 		}
-		quickTunnelAuth, err = quicktunnelauth.NewQuickTunnelAuthHandlerWithAuthorization(
+		quickTunnelAuthorizer, err = quicktunnelauth.NewQuickTunnelAuthHandlerWithAuthorization(
 			stateManager,
 			assertionValidator,
 			sessionManager,
@@ -171,12 +160,38 @@ func RunQuickTunnel(sc *subcommandContext) error {
 		sc.c,
 		buildInfo,
 		&connection.TunnelProperties{
-			Credentials:     credentials,
-			QuickTunnelUrl:  data.Result.Hostname,
-			QuickTunnelAuth: quickTunnelAuth,
+			Credentials:           credentials,
+			QuickTunnelUrl:        data.Result.Hostname,
+			QuickTunnelAuthorizer: quickTunnelAuthorizer,
 		},
 		sc.log,
 	)
+}
+
+func readQuickTunnelProvisioningResponse(body io.Reader) ([]byte, error) {
+	response, err := io.ReadAll(io.LimitReader(body, quickTunnelMaxProvisioningResponse+1))
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read quick-tunnel response")
+	}
+	if len(response) > quickTunnelMaxProvisioningResponse {
+		return nil, errors.New("quick tunnel provisioning response exceeds maximum size")
+	}
+	return response, nil
+}
+
+func decodeQuickTunnelProvisioningResponse(statusCode int, response []byte) (QuickTunnelResponse, error) {
+	var data QuickTunnelResponse
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		if err := json.Unmarshal(response, &data); err == nil && len(data.Errors) > 0 {
+			return QuickTunnelResponse{}, fmt.Errorf("quick tunnel provisioning failed with status %d: %s", statusCode, formatQuickTunnelErrors(data.Errors))
+		}
+		return QuickTunnelResponse{}, fmt.Errorf("quick tunnel provisioning failed with status %d", statusCode)
+	}
+
+	if err := json.Unmarshal(response, &data); err != nil {
+		return QuickTunnelResponse{}, errors.Wrap(err, "failed to unmarshal quick Tunnel")
+	}
+	return data, nil
 }
 
 type QuickTunnelResponse struct {
