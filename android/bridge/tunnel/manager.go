@@ -260,9 +260,11 @@ func (m *Manager) run(
 	originDialerService.AddReservedService(dnsService, []netip.AddrPort{origins.VirtualDNSServiceAddr})
 
 	tunnelConfig := &supervisor.TunnelConfig{
-		ClientConfig:        clientConfig,
-		GracePeriod:         30 * time.Second,
-		HAConnections:       1,
+		ClientConfig: clientConfig,
+		GracePeriod:  30 * time.Second,
+		// Match the Linux default (ha-connections=4). With a single connection the
+		// Cloudflare dashboard reports the tunnel as "Degraded" instead of "Healthy".
+		HAConnections:       4,
 		Tags:                tags,
 		Log:                 &m.logger,
 		Observer:            observer,
