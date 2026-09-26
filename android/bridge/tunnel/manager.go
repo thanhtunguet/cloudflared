@@ -27,6 +27,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Version is the cloudflared release this bridge reports to Cloudflare's edge.
+// The build injects the fork's own version with -ldflags "-X .../tunnel.Version=<v>";
+// the Cloudflare edge and Zero Trust dashboard parse this string, so it must look
+// like a cloudflared release rather than an arbitrary label.
+var Version = "DEV"
+
 // tokenPayload mirrors connection.TunnelToken for local JSON parsing.
 type tokenPayload struct {
 	AccountTag   string    `json:"a"`
@@ -208,7 +214,7 @@ func (m *Manager) run(
 	}
 
 	// Client config
-	clientConfig, err := client.NewConfig("android-embedded", runtime.GOARCH, featureSelector)
+	clientConfig, err := client.NewConfig(Version, runtime.GOARCH, featureSelector)
 	if err != nil {
 		m.recordStartupError(runCtx, fmt.Errorf("client config: %w", err))
 		return
@@ -268,7 +274,7 @@ func (m *Manager) run(
 		Tags:                tags,
 		Log:                 &m.logger,
 		Observer:            observer,
-		ReportedVersion:     "android-embedded",
+		ReportedVersion:     Version,
 		Retries:             5,
 		MaxEdgeAddrRetries:  8,
 		NamedTunnel:         namedTunnel,
